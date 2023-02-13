@@ -9,7 +9,11 @@ specific language governing permissions and limitations
 under the License.
 """
 
-import boto3
+# import boto3
+import requests
+import os
+import json
+KEYSERVER_URL = os.environ["KEYSERVER_URL"]
 
 
 class KeyCache:
@@ -22,16 +26,34 @@ class KeyCache:
         self.keystore_bucket = keystore_bucket
         self.client_url_prefix = client_url_prefix
 
+    def retrieve(self, content_id, key_id):
+        """
+        Store a key into the cache (S3) using the content_id
+        as a folder and key_id as the file
+        """
+        # Get from DRM server
+        response = requests.get(
+            url=KEYSERVER_URL,
+            params={"contentId":content_id,"keyId":key_id}
+        )
+        return json.loads(response.text)
+
     def store(self, content_id, key_id, key_value):
         """
         Store a key into the cache (S3) using the content_id
         as a folder and key_id as the file
         """
-        key = "{cid}/{kid}".format(cid=content_id, kid=key_id)
-        s3_client = boto3.client('s3')
+        # key = "{cid}/{kid}".format(cid=content_id, kid=key_id)
+        # s3_client = boto3.client('s3')
         # store the key file with public-read permissions
         # public bucket policy not required
-        s3_client.put_object(Bucket=self.keystore_bucket, Key=key, Body=key_value)
+        # s3_client.put_object(Bucket=self.keystore_bucket, Key=key, Body=key_value)
+        request_data = {"AssetID":content_id,"KeyHEX":key_value.hex(),"KeyID":key_id}
+        # Send to DRM server
+        requests.post(
+            url=KEYSERVER_URL+"/insert",
+            json=request_data
+        )
 
     def url(self, content_id, key_id):
         """

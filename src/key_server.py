@@ -19,8 +19,8 @@ from key_generator import KeyGenerator
 
 app = Flask(__name__)
 
-BUCKET_NAME = os.environ["KEYSTORE_BUCKET"]
-CLIENT_URL_PREFIX = os.environ["KEYSTORE_URL"]
+BUCKET_NAME = "onwards-drm-keybucket"
+CLIENT_URL_PREFIX = "skd://onwardsdrm"
 
 
 def server_handler(event, context):

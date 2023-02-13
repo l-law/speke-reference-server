@@ -14,7 +14,9 @@ import os
 import xml.etree.ElementTree as element_tree
 import secrets
 import uuid
+import struct
 
+from pssh_pb2 import WidevinePsshData
 from cryptography import x509
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives import hashes, hmac, padding
@@ -35,25 +37,28 @@ HLS_AES_128_KEY_FORMAT_VERSIONS = '1'  # '1'
 HLS_SAMPLE_AES_KEY_FORMAT = 'com.apple.streamingkeydelivery'
 HLS_SAMPLE_AES_KEY_FORMAT_VERSIONS = '1'
 # speke v2.0 settings for fairplay drm
-FAIRPLAY_HLS_SIGNALING_DATA_MEDIA = os.environ["FAIRPLAY_HLS_SIGNALING_DATA_MEDIA"]
-FAIRPLAY_HLS_SIGNALING_DATA_MASTER = os.environ["FAIRPLAY_HLS_SIGNALING_DATA_MASTER"]
+# FAIRPLAY_HLS_SIGNALING_DATA_MEDIA = os.environ["FAIRPLAY_HLS_SIGNALING_DATA_MEDIA"]
+# FAIRPLAY_HLS_SIGNALING_DATA_MASTER = os.environ["FAIRPLAY_HLS_SIGNALING_DATA_MASTER"]
 
 # settings for widevine drm
-WIDEVINE_PSSH_BOX = os.environ["WIDEVINE_PSSH_BOX"]
-WIDEVINE_PROTECTION_HEADER = os.environ["WIDEVINE_PROTECTION_HEADER"]
+# WIDEVINE_PSSH_BOX = os.environ["WIDEVINE_PSSH_BOX"]
+# WIDEVINE_PROTECTION_HEADER = os.environ["WIDEVINE_PROTECTION_HEADER"]
 # speke v2.0 settings for widevine drm
-WIDEVINE_CONTENT_PROTECTION_DATA = os.environ["WIDEVINE_CONTENT_PROTECTION_DATA"]
-WIDEVINE_HLS_SIGNALING_DATA_MEDIA = os.environ["WIDEVINE_HLS_SIGNALING_DATA_MEDIA"]
-WIDEVINE_HLS_SIGNALING_DATA_MASTER = os.environ["WIDEVINE_HLS_SIGNALING_DATA_MASTER"]
+# WIDEVINE_CONTENT_PROTECTION_DATA = os.environ["WIDEVINE_CONTENT_PROTECTION_DATA"]
+# WIDEVINE_HLS_SIGNALING_DATA_MEDIA = os.environ["WIDEVINE_HLS_SIGNALING_DATA_MEDIA"]
+# WIDEVINE_HLS_SIGNALING_DATA_MASTER = os.environ["WIDEVINE_HLS_SIGNALING_DATA_MASTER"]
 
 # settings for playready drm
-PLAYREADY_PSSH_BOX = os.environ["PLAYREADY_PSSH_BOX"]
-PLAYREADY_PROTECTION_HEADER = os.environ["PLAYREADY_PROTECTION_HEADER"]
-PLAYREADY_CONTENT_KEY = os.environ["PLAYREADY_CONTENT_KEY"]
+# PLAYREADY_PSSH_BOX = os.environ["PLAYREADY_PSSH_BOX"]
+# PLAYREADY_PROTECTION_HEADER = os.environ["PLAYREADY_PROTECTION_HEADER"]
+# PLAYREADY_CONTENT_KEY = os.environ["PLAYREADY_CONTENT_KEY"]
 # speke v2.0 settings for playready drm
-PLAYREADY_CONTENT_PROTECTION_DATA = os.environ["PLAYREADY_CONTENT_PROTECTION_DATA"]
-PLAYREADY_HLS_SIGNALING_DATA_MEDIA = os.environ["PLAYREADY_HLS_SIGNALING_DATA_MEDIA"]
-PLAYREADY_HLS_SIGNALING_DATA_MASTER = os.environ["PLAYREADY_HLS_SIGNALING_DATA_MASTER"]
+# PLAYREADY_CONTENT_PROTECTION_DATA = os.environ["PLAYREADY_CONTENT_PROTECTION_DATA"]
+# PLAYREADY_HLS_SIGNALING_DATA_MEDIA = os.environ["PLAYREADY_HLS_SIGNALING_DATA_MEDIA"]
+# PLAYREADY_HLS_SIGNALING_DATA_MASTER = os.environ["PLAYREADY_HLS_SIGNALING_DATA_MASTER"]
+
+WIDEVINE_PROVIDER = "widevine_test"
+WIDEVINE_TRACKTYPE = "SD"
 
 # globals for encrypted document responses
 DOCUMENT_KEY_SIZE = 32
@@ -81,6 +86,31 @@ class ServerResponseBuilder:
         element_tree.register_namespace("speke", "urn:aws:amazon:com:speke")
         element_tree.register_namespace("ds", "http://www.w3.org/2000/09/xmldsig#")
         element_tree.register_namespace("enc", "http://www.w3.org/2001/04/xmlenc#")
+
+    def _create_bin_int(self, value):
+        """Creates a binary string as 4-byte array from the given integer."""
+        return struct.pack('>i', value)
+
+    def _create_pssh_data(self, content_id, kid):
+        widevine_pssh_data = WidevinePsshData()
+        widevine_pssh_data.algorithm = WidevinePsshData.AESCTR
+        widevine_pssh_data.key_id.append(uuid.UUID(kid).bytes)
+        widevine_pssh_data.content_id = content_id.encode()
+        widevine_pssh_data.provider = WIDEVINE_PROVIDER
+        widevine_pssh_data.track_type = WIDEVINE_TRACKTYPE
+        return widevine_pssh_data.SerializeToString()
+
+    def _create_pssh_box(self, version, system_id, content_id, kid):
+        """Converts the PSSH box to a binary string."""
+        pssh_data = self._create_pssh_data(content_id, kid)
+        ret = b'pssh' + self._create_bin_int(version << 24)
+        ret += uuid.UUID(system_id).bytes
+        if version == 1:
+          ret += self._create_bin_int(1) # num of KIDs
+          ret += uuid.UUID(kid).bytes
+        ret += self._create_bin_int(len(pssh_data))
+        ret += pssh_data
+        return self._create_bin_int(len(ret) + 4) + ret
 
     def fixup_document(self, drm_system, system_id, content_id, kid):
         """
@@ -129,19 +159,20 @@ class ServerResponseBuilder:
                 drm_system, "{urn:aws:amazon:com:speke}ProtectionHeader")
             self.safe_remove(drm_system, "{urn:dashif:org:cpix}URIExtXKey")
         elif system_id.lower() == DASH_CENC_SYSTEM_ID.lower():
-            drm_system.find("{urn:dashif:org:cpix}PSSH").text = WIDEVINE_PSSH_BOX
+            base64Pssh = base64.b64encode(self._create_pssh_box(1, system_id, content_id, kid)).decode('utf-8')
+            drm_system.find("{urn:dashif:org:cpix}PSSH").text = base64Pssh
             self.safe_remove(drm_system, "{urn:aws:amazon:com:speke}KeyFormat")
             self.safe_remove(drm_system, "{urn:aws:amazon:com:speke}KeyFormatVersions")
             self.safe_remove(drm_system, "{urn:aws:amazon:com:speke}ProtectionHeader")
             self.safe_remove(drm_system, "{urn:dashif:org:cpix}URIExtXKey")
         elif system_id.lower() == PLAYREADY_SYSTEM_ID.lower():
-            drm_system.find("{urn:aws:amazon:com:speke}ProtectionHeader").text = PLAYREADY_PROTECTION_HEADER
-            drm_system.find("{urn:dashif:org:cpix}PSSH").text = PLAYREADY_PSSH_BOX
+            # drm_system.find("{urn:aws:amazon:com:speke}ProtectionHeader").text = PLAYREADY_PROTECTION_HEADER
+            # drm_system.find("{urn:dashif:org:cpix}PSSH").text = PLAYREADY_PSSH_BOX
             self.safe_remove(drm_system, "{urn:dashif:org:cpix}ContentProtectionData")
             self.safe_remove(drm_system, "{urn:aws:amazon:com:speke}KeyFormat")
             self.safe_remove(drm_system, "{urn:aws:amazon:com:speke}KeyFormatVersions")
             self.safe_remove(drm_system, "{urn:dashif:org:cpix}URIExtXKey")
-            self.use_playready_content_key = True
+            # self.use_playready_content_key = True
         else:
             raise Exception("Invalid system ID {}".format(system_id))
 
@@ -191,22 +222,26 @@ class ServerResponseBuilder:
         for drm_system in self.root.findall("./{urn:dashif:org:cpix}DRMSystemList/{urn:dashif:org:cpix}DRMSystem"):
             kid = drm_system.get("kid")
             system_id = drm_system.get("systemId")
-            system_ids[system_id] = kid
+            if system_id not in system_ids:
+                system_ids[system_id] = []
+            system_ids[system_id].append(kid)
             print("SYSTEM-ID {}".format(system_id.lower()))
             self.fixup_document(drm_system, system_id, content_id, kid)
 
         for content_key in self.root.findall("./{urn:dashif:org:cpix}ContentKeyList/{urn:dashif:org:cpix}ContentKey"):
             kid = content_key.get("kid")
-            init_vector = content_key.get("explicitIV")
+            # init_vector = content_key.get("explicitIV")
             data = element_tree.SubElement(content_key, "{urn:dashif:org:cpix}Data")
             secret = element_tree.SubElement(data, "{urn:ietf:params:xml:ns:keyprov:pskc}Secret")
+            key = self.cache.retrieve(content_id, kid)
+            iv_bytes = bytearray.fromhex(key["ODRM"]["FairPlay"]["KeyHEX"])[16:]
             # HLS SAMPLE AES Only
-            if init_vector is None and system_ids.get(HLS_SAMPLE_AES_SYSTEM_ID, False) == kid:
-                content_key.set('explicitIV', base64.b64encode(self.generator.key(content_id, kid)).decode('utf-8'))
+            if kid in system_ids.get(HLS_SAMPLE_AES_SYSTEM_ID, []):
+                content_key.set('explicitIV', base64.b64encode(iv_bytes).decode('utf-8'))
             # generate the key
-            key_bytes = self.generator.key(content_id, kid)
+            key_bytes = bytearray.fromhex(key["ODRM"]["FairPlay"]["KeyHEX"])[:16]
             # store to the key in the cache
-            self.cache.store(content_id, kid, key_bytes)
+            # self.cache.store(content_id, kid, key_bytes+iv_bytes)
             # log
             print("NEW-KEY {} {}".format(content_id, kid))
             # update the encrypted response
@@ -225,7 +260,8 @@ class ServerResponseBuilder:
                 plain_value = element_tree.SubElement(secret, "{urn:ietf:params:xml:ns:keyprov:pskc}PlainValue")
                 # PLAYREADY ONLY
                 if self.use_playready_content_key:
-                    plain_value.text = PLAYREADY_CONTENT_KEY
+                    pass
+                    # plain_value.text = PLAYREADY_CONTENT_KEY
                 else:
                     plain_value.text = base64.b64encode(key_bytes).decode('utf-8')
 
@@ -272,6 +308,14 @@ class ServerResponseBuilder:
             element.remove(match)
 
 class ServerResponseBuilderV2(ServerResponseBuilder):
+    def _create_ext_key(self, method, uri, keyformat, keyformatversion):
+        tag = "#EXT-X-KEY:METHOD={},URI={},KEYFORMAT={},KEYFORMATVERSIONS={}".format(method, uri, keyformat, keyformatversion)
+        return base64.b64encode(tag.encode('utf-8')).decode('utf-8')
+
+    def _create_ext_session_key(self, method, uri, keyformat, keyformatversion):
+        tag = "#EXT-X-SESSION-KEY:METHOD={},URI=\"{}\",KEYFORMAT=\"{}\",KEYFORMATVERSIONS=\"{}\"".format(method, uri, keyformat, keyformatversion)
+        return base64.b64encode(tag.encode('utf-8')).decode('utf-8')
+
     def get_content_id(self):
         return self.root.get("contentId")
 
@@ -282,35 +326,41 @@ class ServerResponseBuilderV2(ServerResponseBuilder):
         # DRMSystem for WIDEVINE_SYSTEM_ID
         if system_id.lower() == DASH_CENC_SYSTEM_ID.lower():
             pssh_box = drm_system.find("{urn:dashif:org:cpix}PSSH")
+            base64Pssh = base64.b64encode(self._create_pssh_box(1, system_id, content_id, kid)).decode('utf-8')
             if pssh_box is not None:
-                pssh_box.text = WIDEVINE_PSSH_BOX
+                pssh_box.text = base64Pssh
             
             content_protection_data = drm_system.find("{urn:dashif:org:cpix}ContentProtectionData")
             if content_protection_data is not None:
-                content_protection_data.text = WIDEVINE_CONTENT_PROTECTION_DATA
+                content_protection_data_raw = '<pssh xmlns="urn:mpeg:cenc:2013">' + base64Pssh + '</pssh>'
+                content_protection_data.text = base64.b64encode(content_protection_data_raw.encode('utf-8')).decode('utf-8')
 
             hls_signalling_data_elems = drm_system.findall("{urn:dashif:org:cpix}HLSSignalingData")
             if hls_signalling_data_elems:
-                drm_system.find("{urn:dashif:org:cpix}HLSSignalingData[@playlist='media']").text = WIDEVINE_HLS_SIGNALING_DATA_MEDIA
-                drm_system.find("{urn:dashif:org:cpix}HLSSignalingData[@playlist='master']").text = WIDEVINE_HLS_SIGNALING_DATA_MASTER
+                drm_system.find("{urn:dashif:org:cpix}HLSSignalingData[@playlist='media']").text = self._create_ext_key("SAMPLE-AES", self.cache.url(content_id, kid), HLS_SAMPLE_AES_KEY_FORMAT, HLS_SAMPLE_AES_KEY_FORMAT_VERSIONS)
+                drm_system.find("{urn:dashif:org:cpix}HLSSignalingData[@playlist='master']").text = self._create_ext_session_key("SAMPLE-AES", self.cache.url(content_id, kid), HLS_SAMPLE_AES_KEY_FORMAT, HLS_SAMPLE_AES_KEY_FORMAT_VERSIONS)
+                self.safe_remove(drm_system, "{urn:dashif:org:cpix}HLSSignalingData[@playlist='media']")
+                self.safe_remove(drm_system, "{urn:dashif:org:cpix}HLSSignalingData[@playlist='master']")
+                self.safe_remove(drm_system, "{urn:dashif:org:cpix}HLSSignalingData")
+                self.safe_remove(drm_system, "{urn:dashif:org:cpix}HLSSignalingData")
 
         # DRMSystem for PLAYREADY_SYSTEM_ID
         elif system_id.lower() == PLAYREADY_SYSTEM_ID.lower():
-            pssh_box = drm_system.find("{urn:dashif:org:cpix}PSSH")
-            if pssh_box is not None:
-                pssh_box.text = PLAYREADY_PSSH_BOX
+            # pssh_box = drm_system.find("{urn:dashif:org:cpix}PSSH")
+            # if pssh_box is not None:
+            #     pssh_box.text = PLAYREADY_PSSH_BOX
 
-            content_protection_data = drm_system.find("{urn:dashif:org:cpix}ContentProtectionData")
-            if content_protection_data is not None:
-                content_protection_data.text = PLAYREADY_CONTENT_PROTECTION_DATA
+            # content_protection_data = drm_system.find("{urn:dashif:org:cpix}ContentProtectionData")
+            # if content_protection_data is not None:
+            #     content_protection_data.text = PLAYREADY_CONTENT_PROTECTION_DATA
             
-            hls_signalling_data_elems = drm_system.findall("{urn:dashif:org:cpix}HLSSignalingData")
-            if hls_signalling_data_elems:
-                drm_system.find("{urn:dashif:org:cpix}HLSSignalingData[@playlist='media']").text = PLAYREADY_HLS_SIGNALING_DATA_MEDIA
-                drm_system.find("{urn:dashif:org:cpix}HLSSignalingData[@playlist='master']").text = PLAYREADY_HLS_SIGNALING_DATA_MASTER
+            # hls_signalling_data_elems = drm_system.findall("{urn:dashif:org:cpix}HLSSignalingData")
+            # if hls_signalling_data_elems:
+            #     drm_system.find("{urn:dashif:org:cpix}HLSSignalingData[@playlist='media']").text = PLAYREADY_HLS_SIGNALING_DATA_MEDIA
+            #     drm_system.find("{urn:dashif:org:cpix}HLSSignalingData[@playlist='master']").text = PLAYREADY_HLS_SIGNALING_DATA_MASTER
             
             self.safe_remove(drm_system, "{urn:dashif:org:cpix}SmoothStreamingProtectionHeaderData")
-            self.use_playready_content_key = True
+            # self.use_playready_content_key = True
 
         # DRMSystem for FAIRPLAY_SYSTEM_ID
         elif system_id.lower() == HLS_SAMPLE_AES_SYSTEM_ID.lower():
@@ -319,8 +369,8 @@ class ServerResponseBuilderV2(ServerResponseBuilder):
             self.safe_remove(drm_system, "{urn:dashif:org:cpix}SmoothStreamingProtectionHeaderData")
             hls_signalling_data_elems = drm_system.findall("{urn:dashif:org:cpix}HLSSignalingData")
             if hls_signalling_data_elems:
-                drm_system.find("{urn:dashif:org:cpix}HLSSignalingData[@playlist='media']").text = FAIRPLAY_HLS_SIGNALING_DATA_MEDIA
-                drm_system.find("{urn:dashif:org:cpix}HLSSignalingData[@playlist='master']").text = FAIRPLAY_HLS_SIGNALING_DATA_MASTER
+                drm_system.find("{urn:dashif:org:cpix}HLSSignalingData[@playlist='media']").text = self._create_ext_key("SAMPLE-AES", self.cache.url(content_id, kid), HLS_SAMPLE_AES_KEY_FORMAT, HLS_SAMPLE_AES_KEY_FORMAT_VERSIONS)
+                drm_system.find("{urn:dashif:org:cpix}HLSSignalingData[@playlist='master']").text = self._create_ext_session_key("SAMPLE-AES", self.cache.url(content_id, kid), HLS_SAMPLE_AES_KEY_FORMAT, HLS_SAMPLE_AES_KEY_FORMAT_VERSIONS)
 
         elif system_id.lower() == CLEAR_KEY_AES_128_SYSTEM_ID.lower():
             ext_x_key_uri = self.cache.url(content_id, kid)
