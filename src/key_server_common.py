@@ -126,9 +126,9 @@ class ServerResponseBuilder:
             self.safe_remove(drm_system, "{urn:dashif:org:cpix}PSSH")
         elif system_id.lower() == HLS_SAMPLE_AES_SYSTEM_ID.lower():
             ext_x_key = self.cache.url(content_id, kid)
-            drm_system.find("{urn:dashif:org:cpix}URIExtXKey").text = base64.b64encode(ext_x_key.encode('utf-8')).decode('utf-8')
-            drm_system.find("{urn:aws:amazon:com:speke}KeyFormat").text = base64.b64encode(HLS_SAMPLE_AES_KEY_FORMAT.encode('utf-8')).decode('utf-8')
-            drm_system.find("{urn:aws:amazon:com:speke}KeyFormatVersions").text = base64.b64encode(HLS_SAMPLE_AES_KEY_FORMAT_VERSIONS.encode('utf-8')).decode('utf-8')
+            #drm_system.find("{urn:dashif:org:cpix}URIExtXKey").text = base64.b64encode(ext_x_key.encode('utf-8')).decode('utf-8')
+            #drm_system.find("{urn:aws:amazon:com:speke}KeyFormat").text = base64.b64encode(HLS_SAMPLE_AES_KEY_FORMAT.encode('utf-8')).decode('utf-8')
+            #drm_system.find("{urn:aws:amazon:com:speke}KeyFormatVersions").text = base64.b64encode(HLS_SAMPLE_AES_KEY_FORMAT_VERSIONS.encode('utf-8')).decode('utf-8')
             self.safe_remove(drm_system, "{urn:dashif:org:cpix}ContentProtectionData")
             self.safe_remove(drm_system, "{urn:aws:amazon:com:speke}ProtectionHeader")
             self.safe_remove(drm_system, "{urn:dashif:org:cpix}PSSH")
@@ -177,7 +177,7 @@ class ServerResponseBuilder:
             raise Exception("Invalid system ID {}".format(system_id))
 
     def get_content_id(self):
-        return self.root.get("id")
+        return self.root.get("contentId")
 
     def fill_request(self):
         """
@@ -221,7 +221,7 @@ class ServerResponseBuilder:
 
         for drm_system in self.root.findall("./{urn:dashif:org:cpix}DRMSystemList/{urn:dashif:org:cpix}DRMSystem"):
             kid = drm_system.get("kid")
-            system_id = drm_system.get("systemId")
+            system_id = drm_system.get("systemId").lower()
             if system_id not in system_ids:
                 system_ids[system_id] = []
             system_ids[system_id].append(kid)
@@ -234,12 +234,18 @@ class ServerResponseBuilder:
             data = element_tree.SubElement(content_key, "{urn:dashif:org:cpix}Data")
             secret = element_tree.SubElement(data, "{urn:ietf:params:xml:ns:keyprov:pskc}Secret")
             key = self.cache.retrieve(content_id, kid)
+            content_key.set("kid", key["KeyId"])
             iv_bytes = bytearray.fromhex(key["ODRM"]["FairPlay"]["KeyHEX"])[16:]
             # HLS SAMPLE AES Only
             if kid in system_ids.get(HLS_SAMPLE_AES_SYSTEM_ID, []):
                 content_key.set('explicitIV', base64.b64encode(iv_bytes).decode('utf-8'))
             # generate the key
             key_bytes = bytearray.fromhex(key["ODRM"]["FairPlay"]["KeyHEX"])[:16]
+
+            for drm_system in self.root.findall("./{urn:dashif:org:cpix}DRMSystemList/{urn:dashif:org:cpix}DRMSystem"):
+                if kid.lower() == drm_system.get("kid").lower():
+                    drm_system.set("kid", key["KeyId"])
+
             # store to the key in the cache
             # self.cache.store(content_id, kid, key_bytes+iv_bytes)
             # log
@@ -304,8 +310,10 @@ class ServerResponseBuilder:
         """
         Helper to remove an element only if it exists.
         """
-        if element.find(match):
-            element.remove(match)
+        if element.find(match) is not None:
+            element.remove(element.find(match))
+        else:
+            print("{} not found".format(match))
 
 class ServerResponseBuilderV2(ServerResponseBuilder):
     def _create_ext_key(self, method, uri, keyformat, keyformatversion):
