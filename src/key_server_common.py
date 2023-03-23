@@ -32,8 +32,8 @@ PLAYREADY_SYSTEM_ID = '9a04f079-9840-4286-ab92-e65be0885f95'
 CLEAR_KEY_AES_128_SYSTEM_ID = '3ea8778f-7742-4bf9-b18b-e834b2acbd47'
 
 # settings for HLS
-HLS_AES_128_KEY_FORMAT = ''  # 'identity'
-HLS_AES_128_KEY_FORMAT_VERSIONS = '1'  # '1'
+HLS_AES_128_KEY_FORMAT = 'identity'
+HLS_AES_128_KEY_FORMAT_VERSIONS = '1'
 HLS_SAMPLE_AES_KEY_FORMAT = 'com.apple.streamingkeydelivery'
 HLS_SAMPLE_AES_KEY_FORMAT_VERSIONS = '1'
 # speke v2.0 settings for fairplay drm
@@ -112,6 +112,14 @@ class ServerResponseBuilder:
         ret += pssh_data
         return self._create_bin_int(len(ret) + 4) + ret
 
+    def _create_ext_key(self, method, uri, keyformat, keyformatversion):
+        tag = "#EXT-X-KEY:METHOD={},URI=\"{}\",KEYFORMAT=\"{}\",KEYFORMATVERSIONS=\"{}\"".format(method, uri, keyformat, keyformatversion)
+        return base64.b64encode(tag.encode('utf-8')).decode('utf-8')
+
+    def _create_ext_session_key(self, method, uri, keyformat, keyformatversion):
+        tag = "#EXT-X-SESSION-KEY:METHOD={},URI=\"{}\",KEYFORMAT=\"{}\",KEYFORMATVERSIONS=\"{}\"".format(method, uri, keyformat, keyformatversion)
+        return base64.b64encode(tag.encode('utf-8')).decode('utf-8')
+
     def fixup_document(self, drm_system, system_id, content_id, kid):
         """
         Update the returned XML document based on the specified system ID
@@ -125,10 +133,18 @@ class ServerResponseBuilder:
             self.safe_remove(drm_system, "{urn:aws:amazon:com:speke}ProtectionHeader")
             self.safe_remove(drm_system, "{urn:dashif:org:cpix}PSSH")
         elif system_id.lower() == HLS_SAMPLE_AES_SYSTEM_ID.lower():
-            ext_x_key = self.cache.url(content_id, kid)
-            #drm_system.find("{urn:dashif:org:cpix}URIExtXKey").text = base64.b64encode(ext_x_key.encode('utf-8')).decode('utf-8')
-            #drm_system.find("{urn:aws:amazon:com:speke}KeyFormat").text = base64.b64encode(HLS_SAMPLE_AES_KEY_FORMAT.encode('utf-8')).decode('utf-8')
-            #drm_system.find("{urn:aws:amazon:com:speke}KeyFormatVersions").text = base64.b64encode(HLS_SAMPLE_AES_KEY_FORMAT_VERSIONS.encode('utf-8')).decode('utf-8')
+            ext_x_key_uri = self.cache.url(content_id, kid)
+            self.safe_update(drm_system, "{urn:dashif:org:cpix}URIExtXKey", base64.b64encode(ext_x_key_uri.encode('utf-8')).decode('utf-8'))
+            self.safe_update(drm_system, "{urn:aws:amazon:com:speke}KeyFormat", base64.b64encode(HLS_SAMPLE_AES_KEY_FORMAT.encode('utf-8')).decode('utf-8'))
+            self.safe_update(drm_system, "{urn:aws:amazon:com:speke}KeyFormatVersions", base64.b64encode(HLS_SAMPLE_AES_KEY_FORMAT_VERSIONS.encode('utf-8')).decode('utf-8'))
+
+            ext_x_key = self._create_ext_key("SAMPLE-AES", self.cache.url(content_id, kid), HLS_SAMPLE_AES_KEY_FORMAT, HLS_SAMPLE_AES_KEY_FORMAT_VERSIONS)
+            ext_x_session_key = self._create_ext_session_key("SAMPLE-AES", self.cache.url(content_id, kid), HLS_SAMPLE_AES_KEY_FORMAT, HLS_SAMPLE_AES_KEY_FORMAT_VERSIONS)
+
+            self.safe_update(drm_system, "{urn:dashif:org:cpix}HLSSignalingData", ext_x_key)
+            self.safe_update(drm_system, "{urn:dashif:org:cpix}HLSSignalingData[@playlist='media']", ext_x_key)
+            self.safe_update(drm_system, "{urn:dashif:org:cpix}HLSSignalingData[@playlist='master']", ext_x_session_key)
+
             self.safe_remove(drm_system, "{urn:dashif:org:cpix}ContentProtectionData")
             self.safe_remove(drm_system, "{urn:aws:amazon:com:speke}ProtectionHeader")
             self.safe_remove(drm_system, "{urn:dashif:org:cpix}PSSH")
@@ -160,7 +176,12 @@ class ServerResponseBuilder:
             self.safe_remove(drm_system, "{urn:dashif:org:cpix}URIExtXKey")
         elif system_id.lower() == DASH_CENC_SYSTEM_ID.lower():
             base64Pssh = base64.b64encode(self._create_pssh_box(1, system_id, content_id, kid)).decode('utf-8')
-            drm_system.find("{urn:dashif:org:cpix}PSSH").text = base64Pssh
+            self.safe_update(drm_system, "{urn:dashif:org:cpix}PSSH", base64Pssh)
+
+            content_protection_data_raw = '<pssh xmlns="urn:mpeg:cenc:2013">' + base64Pssh + '</pssh>'
+            content_protection_data_base64 = base64.b64encode(content_protection_data_raw.encode('utf-8')).decode('utf-8')
+            self.safe_update(drm_system, "{urn:dashif:org:cpix}ContentProtectionData", content_protection_data_base64)
+
             self.safe_remove(drm_system, "{urn:aws:amazon:com:speke}KeyFormat")
             self.safe_remove(drm_system, "{urn:aws:amazon:com:speke}KeyFormatVersions")
             self.safe_remove(drm_system, "{urn:aws:amazon:com:speke}ProtectionHeader")
@@ -177,7 +198,10 @@ class ServerResponseBuilder:
             raise Exception("Invalid system ID {}".format(system_id))
 
     def get_content_id(self):
-        return self.root.get("contentId")
+        id = self.root.get("contentId")
+        if not id:
+            id = self.root.get("id")
+        return id
 
     def fill_request(self):
         """
@@ -226,14 +250,15 @@ class ServerResponseBuilder:
                 system_ids[system_id] = []
             system_ids[system_id].append(kid)
             print("SYSTEM-ID {}".format(system_id.lower()))
-            self.fixup_document(drm_system, system_id, content_id, kid)
 
         for content_key in self.root.findall("./{urn:dashif:org:cpix}ContentKeyList/{urn:dashif:org:cpix}ContentKey"):
+            newkid = str(uuid.uuid4())
             kid = content_key.get("kid")
+            print("KID from {} to {}".format(kid, newkid))
             # init_vector = content_key.get("explicitIV")
             data = element_tree.SubElement(content_key, "{urn:dashif:org:cpix}Data")
             secret = element_tree.SubElement(data, "{urn:ietf:params:xml:ns:keyprov:pskc}Secret")
-            key = self.cache.retrieve(content_id, kid)
+            key = self.cache.retrieve(content_id, newkid)
             content_key.set("kid", key["KeyId"])
             iv_bytes = bytearray.fromhex(key["ODRM"]["FairPlay"]["KeyHEX"])[16:]
             # HLS SAMPLE AES Only
@@ -245,11 +270,15 @@ class ServerResponseBuilder:
             for drm_system in self.root.findall("./{urn:dashif:org:cpix}DRMSystemList/{urn:dashif:org:cpix}DRMSystem"):
                 if kid.lower() == drm_system.get("kid").lower():
                     drm_system.set("kid", key["KeyId"])
+                    self.fixup_document(drm_system, drm_system.get("systemId").lower(), content_id, key["KeyId"])
+
+            for key_usage in self.root.findall("./{urn:dashif:org:cpix}ContentKeyUsageRuleList/{urn:dashif:org:cpix}ContentKeyUsageRule"):
+                if kid.lower() == key_usage.get("kid").lower():
+                    key_usage.set("kid", key["KeyId"])
 
             # store to the key in the cache
-            # self.cache.store(content_id, kid, key_bytes+iv_bytes)
             # log
-            print("NEW-KEY {} {}".format(content_id, kid))
+            print("NEW-KEY {} {}".format(content_id, newkid))
             # update the encrypted response
             if encrypted_response_recipients:
                 # store the key encrypted
@@ -306,6 +335,10 @@ class ServerResponseBuilder:
         hmac_instance.update(base64.b64decode(encrypted_string))
         value_mac.text = base64.b64encode(hmac_instance.finalize()).decode('utf-8')
 
+    def safe_update(self, element, match, text):
+        if element.find(match) is not None:
+            element.find(match).text = text
+
     def safe_remove(self, element, match):
         """
         Helper to remove an element only if it exists.
@@ -316,14 +349,6 @@ class ServerResponseBuilder:
             print("{} not found".format(match))
 
 class ServerResponseBuilderV2(ServerResponseBuilder):
-    def _create_ext_key(self, method, uri, keyformat, keyformatversion):
-        tag = "#EXT-X-KEY:METHOD={},URI={},KEYFORMAT={},KEYFORMATVERSIONS={}".format(method, uri, keyformat, keyformatversion)
-        return base64.b64encode(tag.encode('utf-8')).decode('utf-8')
-
-    def _create_ext_session_key(self, method, uri, keyformat, keyformatversion):
-        tag = "#EXT-X-SESSION-KEY:METHOD={},URI=\"{}\",KEYFORMAT=\"{}\",KEYFORMATVERSIONS=\"{}\"".format(method, uri, keyformat, keyformatversion)
-        return base64.b64encode(tag.encode('utf-8')).decode('utf-8')
-
     def get_content_id(self):
         return self.root.get("contentId")
 
